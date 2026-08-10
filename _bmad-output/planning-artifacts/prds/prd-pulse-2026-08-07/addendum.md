@@ -6,34 +6,15 @@ Depth that belongs downstream (architecture, solution design, UX spec) rather th
 
 ## A. Infrastructure feasibility research (2026-08-07)
 
-Web research commissioned during Discovery to resolve brainstorm open items 2 and several watch items. Findings are grouped by the question they answer. Where a finding contradicts a brainstorm decision, that is flagged.
+Web research commissioned during Discovery to resolve brainstorm open item 2 and several watch items. Findings are grouped by the question they answer. Where a finding contradicts a brainstorm decision, that is flagged.
 
 ### A.1 Raw snapshot storage — Git LFS retained (decision 2026-08-07)
 
-**Outcome: the brainstorm decision stands.** Public raw snapshots are committed in-repo via Git LFS. The research below argued against it; the bandwidth objection was withdrawn on review as overstated at pulse's actual data volume. The findings are retained because two of them convert into requirements — see *Decision* at the end of this section.
+**Decision: the brainstorm decision stands.** Public raw snapshots are committed in-repo via Git LFS.
 
-**Research findings as reported:**
+Research during Discovery argued for plain git instead, on the grounds that LFS download bandwidth is billed to the repository owner — per account rather than per repo — and that plain git handles KB–MB snapshots comfortably. The objection was withdrawn on review as overstated at pulse's actual volume: the monthly bandwidth allowance is on the order of two hundred full clones, which a personal portfolio repo will not reach, and an overage is recoverable rather than destructive. GitHub's own guidance also points toward LFS for data files.
 
-- Free/Pro Git LFS quota is 10 GiB storage + 10 GiB bandwidth/month, **per account, not per repo** — shared across all of Yann's repos.
-- GitHub documents that LFS download bandwidth is charged to the **repository owner**, regardless of who clones. On a public portfolio repo, any stranger, scraper, or CI fork cloning with LFS burns Yann's monthly quota. This directly undermines the "anyone can clone and rebuild" portfolio goal — the more successful the portfolio piece, the faster the quota drains.
-- Overage is post-paid metered (~$0.07/GiB-mo storage, ~$0.0875/GiB egress). With no payment method or a $0 budget cap, GitHub **hard-blocks** pushes and LFS pulls for the rest of the calendar month.
-- `actions/checkout` defaults to `lfs: false` (pointer files only, no bandwidth) — but dbt would then read 130-byte pointers instead of data, so the monthly job must set `lfs: true`, which is reported to consume the owner's quota even from GitHub-hosted runners.
-- At the stated snapshot volume (KBs–MBs per run, tens of MB per year), **plain git handles this comfortably**: delta compression applies, `git log` diffs stay meaningful, no metering, no pointer indirection. GitHub's repo soft limit is ~1 GB recommended / 5 GB warning; the hard per-file block is 100 MB.
-
-*Original recommendation was: commit snapshots with plain git, reserving GitHub Release assets as an escape hatch above ~50 MB.*
-
-**Decision (2026-08-07): retain Git LFS.**
-
-The quota argument does not survive contact with pulse's actual volume. At KB–MB per snapshot, 10 GiB/month is on the order of two hundred full clones of a 50 MB LFS payload — a level of traffic a personal portfolio repo will not reach, and if it did, the overage is recoverable rather than destructive. GitHub's own guidance also does point toward LFS for large files, though that guidance targets large individual binaries that delta-compress poorly, which is the opposite of pulse's many-small-text-files shape.
-
-The concern that survives is unrelated to quota: **LFS interacts badly with the clone-and-rebuild portfolio goal.** A visitor who clones without `git-lfs` installed receives 130-byte pointer files that superficially resemble data; dbt then parses pointer text where it expects CSV, and the failure presents as a confusing parse error rather than an obvious missing-data error. Secondarily, `git log -p` over a snapshot ceases to be readable, costing some of the archive's introspectability.
-
-Two mitigations were accepted and are carried into the PRD as requirements rather than notes:
-
-1. The README states the `git lfs install` prerequisite up front, **and** the build performs a pointer-file check that fails loudly rather than allowing dbt to parse pointer text.
-2. Actions checkout sets `lfs: true` only on steps that require snapshots, and `lfs: false` everywhere else.
-
-Retained as a watch item: GitHub LFS overage at a $0 budget hard-blocks pushes and LFS pulls for the remainder of the calendar month. Cheap insurance is to set a non-zero budget cap or a billing alert.
+Recorded for reference: quota is 10 GiB storage and 10 GiB bandwidth per month on Free/Pro, with overage post-paid metered; `actions/checkout` defaults to `lfs: false`, which fetches pointer files only, so any step needing snapshot contents must set `lfs: true`. The README states the `git lfs install` prerequisite for anyone cloning.
 
 ### A.2 duckdb-wasm hosting — resolves brainstorm open item 2
 
@@ -45,19 +26,19 @@ duckdb-wasm ships three bundles selected at runtime by `selectBundle()`:
 | **EH** | **No** | WASM exception handling; the practical default |
 | COI | Yes | pthread worker; multithreading is still flagged experimental upstream, with open issues on extension loading and OPFS |
 
-Single-threaded EH loses intra-query parallelism (roughly linear slowdown on scan/aggregate-heavy work) but **loses no SQL features** over parquet.
+Single-threaded EH gives up intra-query parallelism (roughly linear slowdown on scan/aggregate-heavy work) but **loses no SQL features** over parquet.
 
 Host header support: GitHub Pages **cannot** set custom headers (open request since 2021, no ETA). Cloudflare Pages, Netlify and Vercel all can, via `_headers` / `vercel.json`.
 
-`coi-serviceworker` is a workaround but a fragile one: separate same-origin file, HTTPS or localhost only, forces a page reload on first visit, scope must match subdirectory deploys, and enabling COEP then blocks cross-origin subresources unless they send CORP.
+`coi-serviceworker` is a workaround but a fragile one: it needs a separate same-origin file, works only over HTTPS or localhost, forces a page reload on first visit, must have its scope matched to subdirectory deploys, and — because it enables COEP — blocks cross-origin subresources unless they send CORP.
 
 **Recommendation:** target the single-threaded EH bundle, require no special headers, keep GitHub Pages viable. If profiling later proves threads are needed, migrate to Cloudflare Pages and set COOP/COEP there. Do not adopt coi-serviceworker.
 
 ### A.3 Parquet over static hosting — range reads work
 
-DuckDB combines parquet footer metadata with HTTP range requests to fetch only the needed row groups and column chunks; no backend required. The host must send `Accept-Ranges: bytes` and honor `Range` — GitHub Pages and all major CDNs do.
+DuckDB combines parquet footer metadata with HTTP range requests to fetch only the needed row groups and column chunks; no backend required. The host must send `Accept-Ranges: bytes` and honour `Range` — GitHub Pages and all major CDNs do.
 
-Cross-origin parquet additionally needs `Access-Control-Allow-Origin` **and** `Access-Control-Expose-Headers: Content-Range, Accept-Ranges, Content-Length`. GitHub Pages sends `ACAO: *` on public sites but exposed-header support is unverified. Serving parquet **same-origin** sidesteps the question entirely.
+Cross-origin parquet additionally needs `Access-Control-Allow-Origin` **and** `Access-Control-Expose-Headers: Content-Range, Accept-Ranges, Content-Length`. GitHub Pages sends `ACAO: *` on public sites, but exposed-header support is unverified. Serving parquet **same-origin** sidesteps the question entirely.
 
 Performance caveat from the duckdb-wasm issue tracker: remote reads are effectively sequential/blocking XHR, so for files up to ~50–100 MB a whole-file fetch often beats many small range requests. Range reads win on larger files with selective access.
 
@@ -122,7 +103,7 @@ Web research commissioned during Discovery. Its purpose is not to reopen the bui
 | **Streamlit / marimo** | Streamlit is server-based; marimo can `export html-wasm` (Pyodide, deployable to Pages) | Python in-process | Python widgets | Python-idiomatic, hard to make bespoke. |
 | **Metabase / Superset** | Server + DB, GUI-built | Semantic-ish layers | Point-and-click | The contrast class. |
 
-Also notable: **Mosaic/vgplot** (UW IDL) for duckdb-wasm-backed linked views at scale, and **Observable Notebook Kit** (2025) as an open notebook file format with static site tooling.
+Also notable: **Mosaic/vgplot** (UW IDL), for duckdb-wasm-backed linked views at scale, and **Observable Notebook Kit** (2025), an open notebook file format with static site tooling.
 
 ### B.2 What is already served, what pulse reinvents, what is genuinely uncovered
 
@@ -141,11 +122,11 @@ Also notable: **Mosaic/vgplot** (UW IDL) for duckdb-wasm-backed linked views at 
 | Theming tokens across visuals | build yourself | build yourself | build yourself |
 | The data-interface contract | build yourself | build yourself | build yourself |
 
-Two readings follow. First, the build cost of the Vite path is materially higher than the framework paths, and Evidence's Universal SQL cache layer — a substantial piece of engineering — is the largest single item it would forgo. Second, and more useful: **the bottom three rows are pulse's own regardless of choice.** Freshness plumbing and theming are chores; the data-interface contract is not a chore but the actual contribution, and no candidate supplies it because no candidate has pulse's problem.
+Two readings follow. First, the build cost of the Vite path is materially higher than that of the framework paths, and Evidence's Universal SQL cache layer — a substantial piece of engineering — is the largest single item the Vite path would forgo. Second, and more useful: **the bottom three rows are pulse's own regardless of choice.** Freshness plumbing and theming are chores; the data-interface contract is not a chore but the actual contribution, and no candidate supplies it because no candidate has pulse's problem.
 
 **Genuinely uncovered:**
 
-- **No chart-library vocabulary at all.** Observable Framework *permits* hand-written SVG; nothing in the ecosystem *rewards* it. Every tool's unit of work is "a chart of type X"; pulse's unit is "a bespoke visual answering one question." The closest prior art is newsroom graphics and OWID's Grapher, neither of which is a reusable product.
+- **No chart-library vocabulary at all.** Observable Framework *permits* raw SVG; nothing in the ecosystem *rewards* it. Every tool's unit of work is "a chart of type X"; pulse's unit is "a bespoke visual answering one question." The closest prior art is newsroom graphics and OWID's Grapher, neither of which is a reusable product.
 - **AI-agent-as-author as a first-class design constraint.** The 2026 discourse acknowledges that agents now write SQL and visualization code, but the tooling response is agents *driving existing BI*, not repositories *shaped for* agent authorship. Uncovered, though also unproven as a differentiator.
 - **Archive-first ingest semantics** (immutable dated snapshots, as-of querying, provenance) bundled with the publishing layer. No tool ships these together.
 
@@ -154,7 +135,7 @@ Two readings follow. First, the build cost of the Vite path is materially higher
 ### B.3 Prior art: personal data warehouses
 
 - **Dogsheep / Simon Willison** — the canonical statement of the personal data warehouse. `*-to-sqlite` importers plus Datasette. Pattern: one tiny importer per source, one file format, one query UI.
-- **Git scraping** (also Willison) — an Actions cron commits scraped data to git; every commit is a timestamped snapshot. This is pulse's archive layer, already proven and free, and it independently corroborates the plain-git recommendation in §A.1.
+- **Git scraping** (also Willison) — an Actions cron commits scraped data to git; every commit is a timestamped snapshot. This is pulse's archive layer, already proven and free. It was originally cited here in support of the plain-git recommendation; that recommendation was not adopted (§A.1), and the pattern stands on its own as prior art for commit-as-snapshot regardless of whether the blobs travel through LFS.
 - **karlicoss/HPI** plus promnesia — personal data as a Python API rather than a warehouse; strong on source-adapter modularity.
 - **QS Ledger** — quantified-self aggregator plus notebooks; dated, mostly Jupyter.
 - **davidgasquez/datadex** — the closest philosophical sibling: a serverless, local-first open-data platform whose stated principles are Open / Modular / Simple / Data as Code / Glue. Notably it *moved off* Dagster + DuckDB; the reasons are worth reading before committing.
@@ -165,7 +146,7 @@ The recurring pattern across all of them: git-as-storage, one importer per sourc
 ### B.4 Conventions worth adopting rather than inventing
 
 - **File-based data-loader routing** (Observable Framework): `data/wdi.parquet.py` *is* the build rule for `wdi.parquet`. Zero config, self-documenting, cache-invalidated by content hash. Directly compatible with pulse's "sources as folders" decision.
-- **A single site manifest** for navigation, with shared code in a components directory rather than in pages.
+- **A single site manifest** for navigation: shared code lives in a components directory rather than in pages.
 - **The build-time / client-side split** (Evidence): build-time queries serve the narrative; client-side SQL is reserved for interaction. This is exactly pulse's "wasm optional per report" decision, arrived at independently.
 - **Annotations as data** (Evidence's `ReferenceLine` / `ReferenceArea` / `ReferencePoint`): declarative, data-driven overlays — a table of events joined to the chart, never hardcoded coordinates. The single best convention in the space, and directly relevant to pulse's "annotations are first-class content" principle.
 - **Freshness UX via dbt exposures**: `dbt source freshness` plus exposures (which report depends on which model) lets each visual render "as of `<date>`, source `<X>`, snapshot `<hash>`". Archive-first makes this cheap, and it is a visible differentiator.
@@ -223,7 +204,7 @@ The two steps are separable on purpose. Step 1 is a design act, judged on whethe
 "Purpose-built" describes the artifact: tailored to one question, no chart-type vocabulary, no library. "Agent-authored" describes its provenance. These are independent axes — a visual would still be purpose-built if a human drew it — and collapsing them into a single adjective (as "hand-built" did in the original pitch and brainstorm) creates two problems:
 
 - It misdescribes the work. No human draws these.
-- It hides a **design constraint** inside an adjective. Agent authorship is not an implementation detail of pulse; it is a constraint the repository is shaped around. A downstream reader — including the coding agent reading this PRD — that infers a human in the loop will make wrong decisions about how much structure and convention the repository needs.
+- It hides a **design constraint** inside an adjective. Agent authorship is not an implementation detail of pulse; it is a constraint the repository is shaped around. A downstream reader that infers a human in the loop — including the coding agent reading this PRD — will make wrong decisions about how much structure and convention the repository needs.
 
 Terminology consequence: "hand-built", "hand-written" and "hand-authored" are not used anywhere in pulse's documentation. Where the original pitch and brainstorm used them, read "purpose-built".
 
@@ -231,9 +212,7 @@ Terminology consequence: "hand-built", "hand-written" and "hand-authored" are no
 
 If Evidence.dev is selected, step 1's HTML/SVG output must be wrapped as a Svelte component before step 2 can wire it. Whether that wrapping is mechanical enough to be encoded as a skill, or whether it introduces enough friction to distinguish the candidates, is unresolved. It is the sharpest practical difference between the Evidence and Observable Framework paths and should be settled by building one visual each way rather than by argument.
 
----
-
-## C.4 The layer split (2026-08-07)
+### C.4 The layer split (2026-08-07)
 
 Established in conversation with Yann and superseding the all-or-nothing framing of §B.2. pulse divides into layers; only one is closed.
 
@@ -243,7 +222,7 @@ Established in conversation with Yann and superseding the all-or-nothing framing
 | **A2** | Archive semantics: immutable dated snapshots, replayable from raw | Requirement; mechanism open |
 | **B** | Transformation / warehouse | Settled — dbt-duckdb |
 | **C** | Site build: dev server, HMR, routing, bundling, static output | Open |
-| **D** | Data delivery to page | Open. duckdb-wasm on all pages (see below) |
+| **D** | Data delivery to page | Open — duckdb-wasm on all pages (see below) |
 | **E** | Visual authoring | **Closed** — purpose-built, no chart or visualization library at any level |
 | **F** | Freshness / metadata plumbing | pulse's own regardless of choice |
 
@@ -251,7 +230,7 @@ Notes on specific layers:
 
 - **A1 vs A2 are separable.** Build-time data loading (what Observable Framework's loaders do) and monthly archival snapshotting (what the cron does) are different jobs that happen to touch the same data. They may share a mechanism or not. "Sources as folders" is a structuring convention and carries no implication that ingestion must be bespoke.
 - **D — duckdb-wasm on all pages.** This simplifies the brainstorm's "baked JSON default, wasm opt-in per report". The brainstorm chose baked-default for simplicity on low-data pages; uniform wasm turns out to be the simpler option because it removes the dual data-delivery path, the per-report flag, and two code paths that must both keep working. It also removes the last Evidence-specific mismatch, since Evidence's Universal SQL model is wasm-always.
-- **E is Goal 3 stated as a constraint.** A tool that supplies the expressive visual layer removes the part of the project that makes it worth doing.
+- **E is goal 3 stated as a constraint.** A tool that supplies the expressive visual layer removes the part of the project that makes it worth doing.
 
 **Candidates carried forward to architecture:** Evidence.dev, Observable Framework, Vite + own conventions. Carrying named candidates forward is what stops the architecture phase from re-deriving this analysis from scratch.
 
@@ -263,33 +242,9 @@ Recorded so that downstream readers encountering the older documents are not mis
 
 - "hand-built" / "hand-written" / "hand-authored" (pitch, brainstorm) → read **purpose-built**; authorship is stated separately as agent-authored.
 - "baked JSON at build time by default, wasm opt-in per report" (brainstorm) → superseded by duckdb-wasm on all pages.
-- "Public raw is committed in-repo via Git LFS" (brainstorm) → **retained** after challenge; see §D.
-- §B.2's flat "what pulse would reinvent" list → superseded by the conditional cost ledger in §B.2 and the layer split above.
+- "Public raw is committed in-repo via Git LFS" (brainstorm) → **retained** after challenge; see §A.1.
+- "dashboard" (pitch, brainstorm) → read **report**. A report is a standing analysis on one topic, not a grid of tiles.
+- §B.2's flat "what pulse would reinvent" list → superseded by the conditional cost ledger that replaced it and by the layer split in §C.4.
 
----
+**Rejected framings.** Four separate attempts were made during Discovery to derive rules about what visuals *show* — freeze a visual's design once authored, prefer magnitude and direction over precise figures, treat comparison and annotation as a retention mechanism, and design report cadence around exposure frequency. All four were rejected by Yann on the same grounds: these are session-time decisions made per visual against real data, and the PRD's scope is the engine and the workflows, never the content of a visual. Recorded here because the reasoning is sound and the temptation recurs.
 
-## D. Raw snapshot storage — Git LFS retained (2026-08-07)
-
-**Decision: keep Git LFS for public raw snapshots, as the brainstorm specified.** §A.1's recommendation to drop it was raised, challenged by Yann, and not adopted. The decision is his; this section records the reasoning on both sides so it is not silently reopened.
-
-### D.1 The argument for dropping LFS (§A.1)
-
-LFS download bandwidth is billed to the repository *owner* regardless of who clones, against a 10 GiB/month per-account quota shared across all of Yann's repos. On a public portfolio repo, strangers cloning drain that quota. At $0 budget, GitHub hard-blocks pushes and LFS pulls for the remainder of the calendar month. Snapshots are KBs–MBs, which plain git handles with delta compression and readable diffs.
-
-### D.2 Why it was not adopted
-
-Yann's counter-arguments, which hold:
-
-1. **The quota is very unlikely to bind.** 10 GiB/month of clone traffic on a personal project is a large amount of traffic.
-2. **Both failure branches are acceptable.** If the quota binds because the data grew, plain git is no better — a large repo is a large repo. If it binds because the project became popular, that is a problem worth having and is solvable by paying for it.
-3. **Plain git is not unlimited either.** GitHub publishes repository size guidance (under 1 GB recommended, warnings above 5 GB) and documents that repositories may be throttled; GitHub's own advice for large files is to move them to LFS. §A.1 compared metered LFS against an implicitly unmetered plain git, which is not the real comparison. **This is a correction to §A.1, not merely a difference of risk appetite.**
-
-At the stated volume both mechanisms work. LFS additionally keeps clones and git history light, and is the documented path for data files.
-
-### D.3 Retained as a watch item
-
-One nuance to D.1 survives and is worth monitoring, though it was not decisive: the bandwidth-draining traffic is most likely to come from scrapers, bots and CI forks rather than from readers, so consumption is **not** well correlated with the project's success. The "if it's that popular, monetize it" escape valve therefore may not fire when the quota does.
-
-Cheap mitigations if it ever binds, in order: set `lfs: false` on any Actions checkout that does not need snapshot contents (this is already the default and costs nothing); set a $0 budget cap so overage hard-blocks rather than bills; move any single artifact above ~50 MB to a GitHub Release asset (2 GB per asset, unmetered egress).
-
-If Evidence.dev is selected, step 1's HTML/SVG output must be wrapped as a Svelte component before step 2 can wire it. Whether that wrapping is mechanical enough to be encoded as a skill, or whether it introduces enough friction to distinguish the candidates, is unresolved. It is the sharpest practical difference between the Evidence and Observable Framework paths and should be settled by building one visual each way rather than by argument.
